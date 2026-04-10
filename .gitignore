@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+venv/
+env/
+
+# Forecast model checkpoint (large binary, stored externally)
+*.pt
+*.pth
+
+# Claude Code local settings
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
