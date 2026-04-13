@@ -1,14 +1,10 @@
 /*
  * LYMPHA — ESP32 Sensor Firmware
- * ================================
  * Hardware:
- *   ESP32 WROOM-32 (OceanLabz, 30-pin)
- *   pH     : PH-4502C board   → GPIO34 (5V powered, ADC input only)
+ *   pH     : PH-4502C board   → GPIO34
  *   Temp   : DS18B20           → GPIO4  (4.7kΩ pullup to 3.3V)
  *   Turb   : DFRobot Gravity   → GPIO32 (voltage divider: 10kΩ+18kΩ)
  *   TDS    : TDS Meter V1.0    → GPIO33 (3.3V powered)
- *
- * Sends JSON to POST /sensor/push every SEND_INTERVAL_MS milliseconds.
  */
 
 #include <WiFi.h>
@@ -17,41 +13,34 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// ─── CONFIGURATION ───────────────────────────────────────
 const char* WIFI_SSID     = "lenovo";
 const char* WIFI_PASSWORD = "kiwukoora";
 const char* SERVER_URL    = "http://192.168.137.1:8000/sensor/push";
-// Find your PC IP: run `ipconfig` on Windows, use IPv4 address
-// e.g. "http://192.168.1.105:8000/sensor/push"
 
-const int SEND_INTERVAL_MS = 5000;   // send every 5 seconds
+const int SEND_INTERVAL_MS = 5000;
 
-// ─── PIN DEFINITIONS ─────────────────────────────────────
 #define PIN_TEMP     4
 #define PIN_PH       34
 #define PIN_TURB     32
 #define PIN_TDS      33
 
-// ─── pH CALIBRATION ──────────────────────────────────────
-const float PH_NEUTRAL_VOLTAGE = 3.196;  // measured for this board
+const float PH_NEUTRAL_VOLTAGE = 3.196;  // measured at pH 7.0 for this board
 const int   PH_SAMPLES         = 50;
 
-// ─── TDS CALIBRATION ─────────────────────────────────────
-// If you have a reference TDS meter, dip both in the same water.
-// Set TDS_SCALE = reference_reading / raw_reading.
-// Example: reference=200ppm, raw=10ppm → TDS_SCALE = 20.0
-const float TDS_SCALE = 15.0; // calibration: raw ~10ppm × 15 ≈ 150ppm for typical tap water
+// TDS_SCALE: set to (reference_ppm / raw_ppm) using a calibrated reference meter
+const float TDS_SCALE = 15.0;
 
-// ─── DS18B20 SETUP ───────────────────────────────────────
+// Turbidity calibration — adjust based on Serial Monitor raw values:
+//   TURB_CLEAR_RAW  : raw ADC in clean water  (measured ~580)
+//   TURB_TURBID_RAW : raw ADC in turbid water
+#define TURB_CLEAR_RAW   620
+#define TURB_TURBID_RAW  3000
+
 OneWire           oneWire(PIN_TEMP);
 DallasTemperature tempSensor(&oneWire);
 
-// ─── GLOBALS ─────────────────────────────────────────────
 unsigned long lastSendMs = 0;
 
-// ─────────────────────────────────────────────────────────
-// SENSOR READING FUNCTIONS
-// ─────────────────────────────────────────────────────────
 
 float readTemperature() {
   tempSensor.requestTemperatures();
@@ -66,21 +55,10 @@ float readPH() {
     sum += analogRead(PIN_PH);
     delay(10);
   }
-  float raw     = sum / (float)PH_SAMPLES;
-  float voltage = raw * (3.3 / 4095.0);   // ESP32 ADC reads 0–3.3V
-  float ph      = 7.0 + ((PH_NEUTRAL_VOLTAGE - voltage) / 0.18);
-  ph = constrain(ph, 0.0, 14.0);
-  return ph;
+  float voltage = (sum / (float)PH_SAMPLES) * (3.3 / 4095.0);
+  float ph = 7.0 + ((PH_NEUTRAL_VOLTAGE - voltage) / 0.18);
+  return constrain(ph, 0.0, 14.0);
 }
-
-// Returns turbidity in NTU.
-// ── CALIBRATION ──────────────────────────────────────────
-// Upload, open Serial Monitor, look for "[Turb raw=XXXX]" in clear water.
-// Set TURB_CLEAR_RAW to that value, TURB_TURBID_RAW to the value in murky water.
-// If clear water raw is LOW  → sensor outputs low-V for clear  (default below)
-// If clear water raw is HIGH → flip: change the map() direction accordingly.
-#define TURB_CLEAR_RAW   620    // raw ADC at clear/clean water (measured ~580 in tap water)
-#define TURB_TURBID_RAW  3000   // raw ADC at very turbid water
 
 float readTurbidity() {
   long sum = 0;
@@ -91,8 +69,6 @@ float readTurbidity() {
   int raw = (int)(sum / 10);
   Serial.printf("[Turb raw=%d]\n", raw);
 
-  // Map raw → NTU: 0→CLEAR_RAW maps to 0–3 NTU (clear zone),
-  //                 CLEAR_RAW→TURBID_RAW maps to 3–3000 NTU
   float ntu;
   if (raw <= TURB_CLEAR_RAW) {
     ntu = (float)raw / (float)TURB_CLEAR_RAW * 3.0f;
@@ -113,8 +89,7 @@ float readTDS(float tempC) {
   float voltage = voltageSum / 20.0f;
   Serial.printf("[TDS raw_v=%.4fV]\n", voltage);
 
-  // Temperature compensation: conductivity changes ~2% per °C from 25°C
-  float usableTemp = (tempC > 0 && tempC < 100) ? tempC : 25.0f;
+  float usableTemp   = (tempC > 0 && tempC < 100) ? tempC : 25.0f;
   float compensatedV = voltage / (1.0f + 0.02f * (usableTemp - 25.0f));
 
   float tds = (133.42f * pow(compensatedV, 3)
@@ -124,9 +99,6 @@ float readTDS(float tempC) {
   return tds * TDS_SCALE;
 }
 
-// ─────────────────────────────────────────────────────────
-// WIFI
-// ─────────────────────────────────────────────────────────
 
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -145,10 +117,6 @@ void connectWiFi() {
     Serial.println("\n[WiFi] Failed — will retry in loop");
   }
 }
-
-// ─────────────────────────────────────────────────────────
-// HTTP POST
-// ─────────────────────────────────────────────────────────
 
 void sendReading(float ph, float temperature, float turbidity, float tds) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -179,23 +147,17 @@ void sendReading(float ph, float temperature, float turbidity, float tds) {
   http.end();
 }
 
-// ─────────────────────────────────────────────────────────
-// SETUP & LOOP
-// ─────────────────────────────────────────────────────────
 
 void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== LYMPHA Sensor Node ===");
-
   tempSensor.begin();
-  analogReadResolution(12);   // 0–4095
-
+  analogReadResolution(12);
   connectWiFi();
 }
 
 void loop() {
-  // Reconnect if dropped
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WiFi] Reconnecting...");
     connectWiFi();
@@ -212,7 +174,6 @@ void loop() {
 
     Serial.printf("[Sensors] pH=%.2f  Temp=%.1f°C  Turb=%.1f NTU  TDS=%.1f ppm\n",
                   ph, temperature, turbidity, tds);
-
     sendReading(ph, temperature, turbidity, tds);
   }
 }
